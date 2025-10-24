@@ -1,9 +1,9 @@
-import { Client, Databases, Users } from 'node-appwrite';
+import { Client, Databases } from "node-appwrite";
 
 /**
  * Fonction Appwrite pour créer une liste de produits transactionnelle
  * Déclenche une transaction côté serveur avec permissions admin
- *
+ * 
  * Variables d'environnement requises:
  * - APPWRITE_API_KEY (clé API avec permissions admin)
  * - APPWRITE_ENDPOINT
@@ -15,14 +15,52 @@ import { Client, Databases, Users } from 'node-appwrite';
 
 export default async function createProductsList(req, res) {
   try {
-    // 1. Validation des données d'entrée
-    const { eventId, eventData, contentHash, userId } = req.body;
+    console.log("[Appwrite Function] Début de l'exécution");
+    console.log("[Appwrite Function] req.payload:", req.payload);
+    console.log("[Appwrite Function] req.body:", req.body);
 
+    // 1. Parser les données d'entrée (Appwrite envoie en req.payload ou req.body)
+    let inputData;
+    
+    if (req.payload) {
+      // Cas 1: Les données viennent en tant que string dans payload
+      if (typeof req.payload === "string") {
+        inputData = JSON.parse(req.payload);
+      } else {
+        inputData = req.payload;
+      }
+    } else if (req.body) {
+      // Cas 2: Les données viennent en tant que string dans body
+      if (typeof req.body === "string") {
+        inputData = JSON.parse(req.body);
+      } else {
+        inputData = req.body;
+      }
+    } else {
+      throw new Error("Aucune donnée reçue dans la requête");
+    }
+
+    const { eventId, eventData, contentHash, userId } = inputData;
+
+    console.log("[Appwrite Function] Données parsées:", {
+      eventId,
+      userId,
+      hasEventData: !!eventData,
+      contentHash,
+    });
+
+    // 2. Validation des données d'entrée
     if (!eventId || !eventData || !contentHash || !userId) {
+      console.error("[Appwrite Function] Données manquantes", {
+        eventId: !!eventId,
+        eventData: !!eventData,
+        contentHash: !!contentHash,
+        userId: !!userId,
+      });
       return res.json(
         {
           error:
-            'Données manquantes: eventId, eventData, contentHash, userId requis',
+            "Données manquantes: eventId, eventData, contentHash, userId requis",
         },
         400
       );
@@ -32,7 +70,7 @@ export default async function createProductsList(req, res) {
       `[Appwrite Function] Début de création pour l'événement ${eventId} par ${userId}`
     );
 
-    // 2. Initialisation du client Appwrite côté serveur
+    // 3. Initialisation du client Appwrite côté serveur
     const client = new Client()
       .setEndpoint(process.env.APPWRITE_ENDPOINT)
       .setProject(process.env.APPWRITE_PROJECT_ID)
@@ -40,7 +78,7 @@ export default async function createProductsList(req, res) {
 
     const databases = new Databases(client);
 
-    // 3. Vérification que l'événement n'existe pas déjà
+    // 4. Vérification que l'événement n'existe pas déjà
     try {
       await databases.getDocument(
         process.env.DATABASE_ID,
@@ -51,7 +89,7 @@ export default async function createProductsList(req, res) {
         `[Appwrite Function] L'événement ${eventId} existe déjà dans main`
       );
       return res.json(
-        { error: 'Cet événement existe déjà', code: 'already_exists' },
+        { error: "Cet événement existe déjà", code: "already_exists" },
         409
       );
     } catch (error) {
@@ -61,16 +99,16 @@ export default async function createProductsList(req, res) {
       // 404 = document n'existe pas, c'est ce qu'on veut
     }
 
-    // 4. Création de la transaction
+    // 5. Création de la transaction
     const transaction = await databases.createTransaction();
     console.log(`[Appwrite Function] Transaction créée: ${transaction.$id}`);
 
-    // 5. Préparation des opérations
+    // 6. Préparation des opérations
     const operations = [];
 
     // Opération 1: Créer le document main
     operations.push({
-      action: 'create',
+      action: "create",
       databaseId: process.env.DATABASE_ID,
       collectionId: process.env.COLLECTION_MAIN,
       documentId: eventId,
@@ -79,7 +117,7 @@ export default async function createProductsList(req, res) {
         originalDataHash: contentHash,
         isActive: true,
         createdBy: userId,
-        status: 'active',
+        status: "active",
         error: null,
         allDates: eventData.allDates || [],
       },
@@ -93,15 +131,15 @@ export default async function createProductsList(req, res) {
     // Opération 2: Créer tous les produits en bulkCreate
     if (eventData.ingredients && Array.isArray(eventData.ingredients)) {
       operations.push({
-        action: 'bulkCreate',
+        action: "bulkCreate",
         databaseId: process.env.DATABASE_ID,
         collectionId: process.env.COLLECTION_PRODUCTS,
         data: eventData.ingredients.map((ingredient) => ({
           $id: `${ingredient.ingredientHugoUuid}_${eventId}`,
           productHugoUuid:
             ingredient.ingredientHugoUuid || Math.random().toString(36),
-          productName: ingredient.ingredientName || '',
-          productType: ingredient.ingType || '',
+          productName: ingredient.ingredientName || "",
+          productType: ingredient.ingType || "",
           mainId: eventId,
           totalNeededConsolidated: JSON.stringify(
             ingredient.totalNeededConsolidated || []
@@ -131,11 +169,11 @@ export default async function createProductsList(req, res) {
       `[Appwrite Function] ${operations.length} opérations préparées`
     );
 
-    // 6. Exécution des opérations
+    // 7. Exécution des opérations
     await databases.createOperations(transaction.$id, operations);
     console.log(`[Appwrite Function] Opérations exécutées avec succès`);
 
-    // 7. Commit de la transaction
+    // 8. Commit de la transaction
     await databases.updateTransaction(transaction.$id, true);
     console.log(
       `[Appwrite Function] Transaction validée avec succès pour ${eventId}`
@@ -144,36 +182,41 @@ export default async function createProductsList(req, res) {
     return res.json({
       success: true,
       eventId,
-      message: 'Liste de produits créée avec succès',
+      message: "Liste de produits créée avec succès",
     });
   } catch (error) {
     console.error(
       `[Appwrite Function] Erreur lors de la création:`,
       error.message
     );
+    console.error("[Appwrite Function] Stack:", error.stack);
 
-    if (error.code === 'conflict') {
+    if (error.code === "conflict") {
       return res.json(
         {
           error:
-            'Conflit détecté: les données ont été modifiées par une autre opération',
-          code: 'conflict',
+            "Conflit détecté: les données ont été modifiées par une autre opération",
+          code: "conflict",
         },
         409
       );
-    } else if (error.code === 'transaction_limit_exceeded') {
+    } else if (error.code === "transaction_limit_exceeded") {
       return res.json(
         {
           error:
             "Limite de transactions dépassée. Veuillez réduire le nombre d'ingrédients",
-          code: 'transaction_limit_exceeded',
+          code: "transaction_limit_exceeded",
         },
         429
       );
     }
 
     return res.json(
-      { error: error.message || 'Erreur interne du serveur', code: error.code },
+      {
+        error: error.message || "Erreur interne du serveur",
+        code: error.code,
+        stack: error.stack,
+      },
       500
     );
   }
