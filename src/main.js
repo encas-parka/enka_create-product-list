@@ -82,20 +82,13 @@ export default async ({ req, res, log, error }) => {
       // 404 = document n'existe pas, c'est ce qu'on veut
     }
 
-    // 5. Création de la transaction
-    const transaction = await databases.createTransaction();
-    log(`Transaction créée: ${transaction.$id}`);
-
-    // 6. Préparation des opérations
-    const operations = [];
-
-    // Opération 1: Créer le document main
-    operations.push({
-      action: "create",
-      databaseId: process.env.DATABASE_ID,
-      collectionId: process.env.COLLECTION_MAIN,
-      documentId: eventId,
-      data: {
+    // 5. Créer le document main
+    log("Création du document main...");
+    await databases.createDocument(
+      process.env.DATABASE_ID,
+      process.env.COLLECTION_MAIN,
+      eventId,
+      {
         name: eventData.name || `Événement ${eventId}`,
         originalDataHash: contentHash,
         isActive: true,
@@ -104,59 +97,55 @@ export default async ({ req, res, log, error }) => {
         error: null,
         allDates: eventData.allDates || [],
       },
-      $permissions: [
+      [
         `read("user:${userId}")`,
         `update("user:${userId}")`,
         `delete("user:${userId}")`,
-      ],
-    });
+      ]
+    );
+    log("Document main créé avec succès");
 
-    // Opération 2: Créer tous les produits en bulkCreate
+    // 6. Créer tous les produits en bulk avec createDocuments
     if (eventData.ingredients && Array.isArray(eventData.ingredients)) {
-      operations.push({
-        action: "bulkCreate",
-        databaseId: process.env.DATABASE_ID,
-        collectionId: process.env.COLLECTION_PRODUCTS,
-        data: eventData.ingredients.map((ingredient) => ({
-          $id: `${ingredient.ingredientHugoUuid}_${eventId}`,
-          productHugoUuid:
-            ingredient.ingredientHugoUuid || Math.random().toString(36),
-          productName: ingredient.ingredientName || "",
-          productType: ingredient.ingType || "",
-          mainId: eventId,
-          totalNeededConsolidated: JSON.stringify(
-            ingredient.totalNeededConsolidated || []
-          ),
-          totalNeededRaw: JSON.stringify(ingredient.totalNeededRaw || []),
-          neededConsolidatedByDate: JSON.stringify(
-            ingredient.neededConsolidatedByDate || []
-          ),
-          recipesOccurrences: JSON.stringify(
-            ingredient.recipesOccurrences || []
-          ),
-          pFrais: ingredient.pFrais || false,
-          pSurgel: ingredient.pSurgel || false,
-          nbRecipes: ingredient.nbRecipes || 0,
-          totalAssiettes: ingredient.totalAssiettes || 0,
-          conversionRules: ingredient.conversionRules,
-          $permissions: [
-            `read("user:${userId}")`,
-            `update("user:${userId}")`,
-            `delete("user:${userId}")`,
-          ],
-        })),
-      });
+      log(`Création de ${eventData.ingredients.length} produits en bulk...`);
+      
+      const productsDocuments = eventData.ingredients.map((ingredient) => ({
+        $id: `${ingredient.ingredientHugoUuid}_${eventId}`,
+        $permissions: [
+          `read("user:${userId}")`,
+          `update("user:${userId}")`,
+          `delete("user:${userId}")`,
+        ],
+        productHugoUuid:
+          ingredient.ingredientHugoUuid || Math.random().toString(36),
+        productName: ingredient.ingredientName || "",
+        productType: ingredient.ingType || "",
+        mainId: eventId,
+        totalNeededConsolidated: JSON.stringify(
+          ingredient.totalNeededConsolidated || []
+        ),
+        totalNeededRaw: JSON.stringify(ingredient.totalNeededRaw || []),
+        neededConsolidatedByDate: JSON.stringify(
+          ingredient.neededConsolidatedByDate || []
+        ),
+        recipesOccurrences: JSON.stringify(
+          ingredient.recipesOccurrences || []
+        ),
+        pFrais: ingredient.pFrais || false,
+        pSurgel: ingredient.pSurgel || false,
+        nbRecipes: ingredient.nbRecipes || 0,
+        totalAssiettes: ingredient.totalAssiettes || 0,
+        conversionRules: ingredient.conversionRules,
+      }));
+      
+      await databases.createDocuments(
+        process.env.DATABASE_ID,
+        process.env.COLLECTION_PRODUCTS,
+        productsDocuments
+      );
+      
+      log(`${eventData.ingredients.length} produits créés avec succès en bulk`);
     }
-
-    log(`${operations.length} opérations préparées`);
-
-    // 7. Exécution des opérations
-    await databases.createOperations(transaction.$id, operations);
-    log(`Opérations exécutées avec succès`);
-
-    // 8. Commit de la transaction
-    await databases.updateTransaction(transaction.$id, true);
-    log(`Transaction validée avec succès pour ${eventId}`);
 
     return res.json({
       success: true,
