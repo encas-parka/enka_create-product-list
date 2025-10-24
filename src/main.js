@@ -2,8 +2,6 @@ import { Client, Databases } from "node-appwrite";
 
 /**
  * Fonction Appwrite pour créer une liste de produits transactionnelle
- * Déclenche une transaction côté serveur avec permissions admin
- * 
  * Variables d'environnement requises:
  * - APPWRITE_API_KEY (clé API avec permissions admin)
  * - APPWRITE_ENDPOINT
@@ -13,50 +11,36 @@ import { Client, Databases } from "node-appwrite";
  * - COLLECTION_PRODUCTS
  */
 
-export default async function createProductsList(req, res) {
+export default async ({ req, res, log, error }) => {
   try {
-    console.log("[Appwrite Function] Début de l'exécution");
-    console.log("[Appwrite Function] req.payload:", req.payload);
-    console.log("[Appwrite Function] req.body:", req.body);
+    log("Début de l'exécution");
+    log("Body reçu: " + req.bodyText);
 
-    // 1. Parser les données d'entrée (Appwrite envoie en req.payload ou req.body)
+    // 1. Parser les données d'entrée
+    if (!req.bodyText) {
+      error("Aucun body reçu dans la requête");
+      return res.json({ error: "Aucun body reçu" }, 400);
+    }
+
     let inputData;
-    
-    if (req.payload) {
-      // Cas 1: Les données viennent en tant que string dans payload
-      if (typeof req.payload === "string") {
-        inputData = JSON.parse(req.payload);
-      } else {
-        inputData = req.payload;
-      }
-    } else if (req.body) {
-      // Cas 2: Les données viennent en tant que string dans body
-      if (typeof req.body === "string") {
-        inputData = JSON.parse(req.body);
-      } else {
-        inputData = req.body;
-      }
-    } else {
-      throw new Error("Aucune donnée reçue dans la requête");
+    try {
+      inputData = JSON.parse(req.bodyText);
+    } catch (parseError) {
+      error("Erreur lors du parsing JSON: " + parseError.message);
+      return res.json({ error: "Body JSON invalide" }, 400);
     }
 
     const { eventId, eventData, contentHash, userId } = inputData;
 
-    console.log("[Appwrite Function] Données parsées:", {
-      eventId,
-      userId,
-      hasEventData: !!eventData,
-      contentHash,
-    });
+    log(
+      `Données parsées - eventId: ${eventId}, userId: ${userId}, hasEventData: ${!!eventData}`
+    );
 
     // 2. Validation des données d'entrée
     if (!eventId || !eventData || !contentHash || !userId) {
-      console.error("[Appwrite Function] Données manquantes", {
-        eventId: !!eventId,
-        eventData: !!eventData,
-        contentHash: !!contentHash,
-        userId: !!userId,
-      });
+      error(
+        `Données manquantes: eventId=${!!eventId}, eventData=${!!eventData}, contentHash=${!!contentHash}, userId=${!!userId}`
+      );
       return res.json(
         {
           error:
@@ -66,11 +50,12 @@ export default async function createProductsList(req, res) {
       );
     }
 
-    console.log(
-      `[Appwrite Function] Début de création pour l'événement ${eventId} par ${userId}`
+    log(
+      `Début de création pour l'événement ${eventId} par ${userId}`
     );
 
     // 3. Initialisation du client Appwrite côté serveur
+    // Utiliser la clé API stockée en variable d'environnement
     const client = new Client()
       .setEndpoint(process.env.APPWRITE_ENDPOINT)
       .setProject(process.env.APPWRITE_PROJECT_ID)
@@ -85,23 +70,21 @@ export default async function createProductsList(req, res) {
         process.env.COLLECTION_MAIN,
         eventId
       );
-      console.log(
-        `[Appwrite Function] L'événement ${eventId} existe déjà dans main`
-      );
+      log(`L'événement ${eventId} existe déjà dans main`);
       return res.json(
         { error: "Cet événement existe déjà", code: "already_exists" },
         409
       );
-    } catch (error) {
-      if (error.code !== 404) {
-        throw error;
+    } catch (checkError) {
+      if (checkError.code !== 404) {
+        throw checkError;
       }
       // 404 = document n'existe pas, c'est ce qu'on veut
     }
 
     // 5. Création de la transaction
     const transaction = await databases.createTransaction();
-    console.log(`[Appwrite Function] Transaction créée: ${transaction.$id}`);
+    log(`Transaction créée: ${transaction.$id}`);
 
     // 6. Préparation des opérations
     const operations = [];
@@ -165,33 +148,26 @@ export default async function createProductsList(req, res) {
       });
     }
 
-    console.log(
-      `[Appwrite Function] ${operations.length} opérations préparées`
-    );
+    log(`${operations.length} opérations préparées`);
 
     // 7. Exécution des opérations
     await databases.createOperations(transaction.$id, operations);
-    console.log(`[Appwrite Function] Opérations exécutées avec succès`);
+    log(`Opérations exécutées avec succès`);
 
     // 8. Commit de la transaction
     await databases.updateTransaction(transaction.$id, true);
-    console.log(
-      `[Appwrite Function] Transaction validée avec succès pour ${eventId}`
-    );
+    log(`Transaction validée avec succès pour ${eventId}`);
 
     return res.json({
       success: true,
       eventId,
       message: "Liste de produits créée avec succès",
     });
-  } catch (error) {
-    console.error(
-      `[Appwrite Function] Erreur lors de la création:`,
-      error.message
-    );
-    console.error("[Appwrite Function] Stack:", error.stack);
+  } catch (err) {
+    error(`Erreur lors de la création: ${err.message}`);
+    error(`Stack: ${err.stack}`);
 
-    if (error.code === "conflict") {
+    if (err.code === "conflict") {
       return res.json(
         {
           error:
@@ -200,7 +176,7 @@ export default async function createProductsList(req, res) {
         },
         409
       );
-    } else if (error.code === "transaction_limit_exceeded") {
+    } else if (err.code === "transaction_limit_exceeded") {
       return res.json(
         {
           error:
@@ -213,11 +189,10 @@ export default async function createProductsList(req, res) {
 
     return res.json(
       {
-        error: error.message || "Erreur interne du serveur",
-        code: error.code,
-        stack: error.stack,
+        error: err.message || "Erreur interne du serveur",
+        code: err.code,
       },
       500
     );
   }
-}
+};
