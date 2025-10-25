@@ -13,7 +13,7 @@ import { Client, TablesDB, Users } from 'node-appwrite';
  * - COLLECTION_PRODUCTS
  */
 
-export default async function createProductsList({ req, res, log, error }) {
+export default async function createProductsList({ req, res, log, error: logError }) {
   let transactionId = null;
   
   try {
@@ -43,15 +43,16 @@ export default async function createProductsList({ req, res, log, error }) {
       .setProject(process.env.APPWRITE_PROJECT_ID)
       .setKey(process.env.APPWRITE_API_KEY);
 
-    const databases = new TablesDB(client);
+    const tablesDB = new TablesDB(client);
 
     // 3. Vérification que l'événement n'existe pas déjà
+    log(`[Appwrite Function] Vérification de l'existence de ${eventId}...`);
     try {
-      await databases.getDocument(
-        process.env.DATABASE_ID,
-        process.env.COLLECTION_MAIN,
-        eventId
-      );
+      await tablesDB.getRow({
+        databaseId: process.env.DATABASE_ID,
+        tableId: process.env.COLLECTION_MAIN,
+        rowId: eventId
+      });
       log(
         `[Appwrite Function] L'événement ${eventId} existe déjà dans main`
       );
@@ -66,8 +67,10 @@ export default async function createProductsList({ req, res, log, error }) {
       // 404 = document n'existe pas, c'est ce qu'on veut
     }
 
-    // 4. Créer une transaction (TTL par défaut: 60 secondes)
-    const transaction = await databases.createTransaction({
+    // 4. Créer une transaction
+    log(`[Appwrite Function] Création de la transaction...`);
+    
+    const transaction = await tablesDB.createTransaction({
       ttl: 120 // 2 minutes pour laisser le temps aux opérations
     });
     
@@ -75,27 +78,30 @@ export default async function createProductsList({ req, res, log, error }) {
     log(`[Appwrite Function] Transaction créée: ${transactionId}`);
 
     // 5. Créer le document main dans la transaction
-    await databases.createDocument(
-      process.env.DATABASE_ID,
-      process.env.COLLECTION_MAIN,
-      eventId,
-      {
+    log(`[Appwrite Function] Création du document main...`);
+    await tablesDB.createRow({
+      databaseId: process.env.DATABASE_ID,
+      tableId: process.env.COLLECTION_MAIN,
+      rowId: eventId,
+      data: {
         name: eventData.name || `Événement ${eventId}`,
         originalDataHash: contentHash,
         isActive: true,
         createdBy: userId,
         status: 'active',
         error: null,
-        allDates: eventData.allDates || [],
+        allDates: JSON.stringify(eventData.allDates || []),
       },
-      undefined, // permissions
-      transactionId // Lier à la transaction
-    );
+      permissions: undefined,
+      transactionId: transactionId
+    });
 
     log(`[Appwrite Function] Document main créé dans la transaction`);
 
     // 6. Créer tous les produits en bulk dans la transaction
     if (eventData.ingredients && Array.isArray(eventData.ingredients)) {
+      log(`[Appwrite Function] Préparation de ${eventData.ingredients.length} produits...`);
+      
       const productsData = eventData.ingredients.map((ingredient) => ({
         $id: `${ingredient.ingredientHugoUuid}_${eventId}`,
         productHugoUuid: ingredient.ingredientHugoUuid || '',
@@ -120,13 +126,14 @@ export default async function createProductsList({ req, res, log, error }) {
       }));
 
       // Utiliser createRows avec transactionId
-      await databases.createRows(
-        process.env.DATABASE_ID,
-        process.env.COLLECTION_PRODUCTS,
-        productsData,
-        undefined, // permissions
-        transactionId // Lier à la transaction
-      );
+      log(`[Appwrite Function] Création bulk de ${productsData.length} produits...`);
+      await tablesDB.createRows({
+        databaseId: process.env.DATABASE_ID,
+        tableId: process.env.COLLECTION_PRODUCTS,
+        rows: productsData,
+        permissions: undefined,
+        transactionId: transactionId
+      });
 
       log(
         `[Appwrite Function] ${productsData.length} produits créés dans la transaction`
@@ -134,10 +141,10 @@ export default async function createProductsList({ req, res, log, error }) {
     }
 
     // 7. Valider (commit) la transaction
-    await databases.updateTransaction(
-      transactionId,
-      'commit' // ou 'rollback' pour annuler
-    );
+    await tablesDB.updateTransaction({
+      transactionId: transactionId,
+      commit: true
+    });
 
     log(`[Appwrite Function] Transaction validée avec succès`);
 
@@ -149,17 +156,21 @@ export default async function createProductsList({ req, res, log, error }) {
     });
     
   } catch (err) {
-    error(
+    logError(
       `[Appwrite Function] Erreur lors de la création: ${err.message}`
     );
+    logError(`[Appwrite Function] Stack: ${err.stack}`);
 
     // En cas d'erreur, annuler la transaction si elle existe
     if (transactionId) {
       try {
-        await databases.updateTransaction(transactionId, 'rollback');
+        await tablesDB.updateTransaction({
+          transactionId: transactionId,
+          rollback: true
+        });
         log(`[Appwrite Function] Transaction annulée (rollback)`);
       } catch (rollbackError) {
-        error(
+        logError(
           `[Appwrite Function] Erreur lors du rollback: ${rollbackError.message}`
         );
       }
