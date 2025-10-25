@@ -134,9 +134,8 @@ export default async ({ req, res, log, error }) => {
             productName: ingredient.ingredientName || '',
             productType: ingredient.ingType || '',
             mainId: eventId,
-
             totalNeededRaw: JSON.stringify(ingredient.totalNeededRaw || []),
-            occ: JSON.stringify(ingredient.recipesOccurrences || []), // recipesOccurrences
+            occ: JSON.stringify(ingredient.occ || []), // Format optimisé compressé recipeOccurrence
             pFrais: ingredient.pFrais || false,
             pSurgel: ingredient.pSurgel || false,
             nbRecipes: ingredient.nbRecipes || 0,
