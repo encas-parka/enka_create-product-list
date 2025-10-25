@@ -72,7 +72,7 @@ export default async ({ req, res, log, error }) => {
         createdBy: userId,
         status: 'active',
         error: null,
-        allDates: JSON.stringify(eventData.allDates || []),
+        allDates: eventData.allDates || [],
       },
       permissions: undefined,
       transactionId: mainTransaction.$id,
