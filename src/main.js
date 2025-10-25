@@ -81,6 +81,10 @@ export default async ({ req, res, log, error }) => {
       transactionId: mainTransaction.$id,
     });
 
+    // Attendre que la transaction main soit prête
+    log(`[Appwrite Function] Attente de la transaction main...`);
+    await new Promise((resolve) => setTimeout(resolve, 2000)); // 2 secondes
+
     // Valider la transaction du document main
     await tablesDB.updateTransaction({
       transactionId: mainTransaction.$id,
@@ -157,6 +161,12 @@ export default async ({ req, res, log, error }) => {
           });
         }
 
+        // Attendre que la transaction soit prête avant de valider
+        log(
+          `[Appwrite Function] Attente de la transaction ${transactionNumber}...`
+        );
+        await new Promise((resolve) => setTimeout(resolve, 2000)); // 2 secondes
+
         // Valider la transaction de produits
         await tablesDB.updateTransaction({
           transactionId: productTransaction.$id,
@@ -192,18 +202,44 @@ export default async ({ req, res, log, error }) => {
 
     // En cas d'erreur, annuler toutes les transactions existantes
     if (allTransactions.length > 0) {
+      // Attendre un peu avant de tenter le rollback (les transactions ont besoin de temps)
+      await new Promise((resolve) => setTimeout(resolve, 3000)); // 3 secondes
+
       for (const transactionId of allTransactions) {
         try {
-          await tablesDB.updateTransaction({
-            transactionId: transactionId,
-            rollback: true,
-          });
-          log(
-            `[Appwrite Function] Transaction ${transactionId} annulée (rollback)`
-          );
+          // Plusieurs tentatives de rollback avec délai
+          let rollbackSuccess = false;
+          for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+              await tablesDB.updateTransaction({
+                transactionId: transactionId,
+                rollback: true,
+              });
+              log(
+                `[Appwrite Function] Transaction ${transactionId} annulée (rollback) - tentative ${attempt + 1}`
+              );
+              rollbackSuccess = true;
+              break;
+            } catch (rollbackError) {
+              if (attempt < 2) {
+                log(
+                  `[Appwrite Function] Rollback échoué pour ${transactionId}, tentative ${attempt + 1}/3, nouvelle attente...`
+                );
+                await new Promise((resolve) => setTimeout(resolve, 2000)); // 2 secondes
+              } else {
+                throw rollbackError;
+              }
+            }
+          }
+
+          if (!rollbackSuccess) {
+            throw new Error(
+              `Rollback échoué après 3 tentatives pour ${transactionId}`
+            );
+          }
         } catch (rollbackError) {
           error(
-            `[Appwrite Function] Erreur lors du rollback de ${transactionId}: ${rollbackError.message}`
+            `[Appwrite Function] Erreur finale lors du rollback de ${transactionId}: ${rollbackError.message}`
           );
         }
       }
