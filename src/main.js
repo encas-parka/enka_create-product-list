@@ -14,8 +14,6 @@ import { Client, TablesDB } from 'node-appwrite';
  */
 
 export default async ({ req, res, log, error }) => {
-  let transactionId = null;
-
   try {
     // 1. Parse le body JSON
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
@@ -45,18 +43,24 @@ export default async ({ req, res, log, error }) => {
 
     const tablesDB = new TablesDB(client);
 
-    // 4. Créer une transaction
-    log(`[Appwrite Function] Création de la transaction...`);
+    // 4. Variables pour les transactions
+    const maxOperationsPerTransaction = 99; // Free tier limite
+    let allTransactions = [];
 
-    const transaction = await tablesDB.createTransaction({
-      ttl: 120, // 2 minutes pour laisser le temps aux opérations
+    log(`[Appwrite Function] Début de la création multi-transactions...`);
+
+    // 5. Créer le document main dans sa propre transaction
+    log(
+      `[Appwrite Function] Création de la transaction pour le document main...`
+    );
+
+    const mainTransaction = await tablesDB.createTransaction({
+      ttl: 120, // 2 minutes
     });
 
-    transactionId = transaction.$id;
-    log(`[Appwrite Function] Transaction créée: ${transactionId}`);
+    allTransactions.push(mainTransaction.$id);
+    log(`[Appwrite Function] Transaction main créée: ${mainTransaction.$id}`);
 
-    // 5. Créer le document main dans la transaction
-    log(`[Appwrite Function] Création du document main...`);
     await tablesDB.createRow({
       databaseId: process.env.DATABASE_ID,
       tableId: process.env.COLLECTION_MAIN,
@@ -71,104 +75,134 @@ export default async ({ req, res, log, error }) => {
         allDates: JSON.stringify(eventData.allDates || []),
       },
       permissions: undefined,
-      transactionId: transactionId,
+      transactionId: mainTransaction.$id,
     });
 
-    log(`[Appwrite Function] Document main créé dans la transaction`);
+    // Valider la transaction du document main
+    await tablesDB.updateTransaction({
+      transactionId: mainTransaction.$id,
+      commit: true,
+    });
 
-    // 6. Créer tous les produits en bulk dans la transaction (par lots de 100 pour le free tier)
+    log(`[Appwrite Function] Transaction main validée avec succès`);
+
+    // 6. Créer tous les produits en utilisant plusieurs transactions (99 produits max par transaction)
     if (eventData.ingredients && Array.isArray(eventData.ingredients)) {
       const ingredients = eventData.ingredients;
-      const batchSize = 100;
-      const totalBatches = Math.ceil(ingredients.length / batchSize);
-
-      log(
-        `[Appwrite Function] Préparation de ${ingredients.length} produits en ${totalBatches} lot(s) de ${batchSize}...`
+      const productsPerTransaction = maxOperationsPerTransaction;
+      const totalTransactions = Math.ceil(
+        ingredients.length / productsPerTransaction
       );
 
-      for (let i = 0; i < ingredients.length; i += batchSize) {
-        const batch = ingredients.slice(i, i + batchSize);
-        const batchNumber = Math.floor(i / batchSize) + 1;
+      log(
+        `[Appwrite Function] Préparation de ${ingredients.length} produits en ${totalTransactions} transaction(s) de ${productsPerTransaction} produits max...`
+      );
 
-        const productsData = batch.map((ingredient) => ({
-          $id: `${ingredient.ingredientHugoUuid}_${eventId}`,
-          productHugoUuid: ingredient.ingredientHugoUuid || '',
-          productName: ingredient.ingredientName || '',
-          productType: ingredient.ingType || '',
-          mainId: eventId,
-          totalNeededConsolidated: JSON.stringify(
-            ingredient.totalNeededConsolidated || []
-          ),
-          totalNeededRaw: JSON.stringify(ingredient.totalNeededRaw || []),
-          neededConsolidatedByDate: JSON.stringify(
-            ingredient.neededConsolidatedByDate || []
-          ),
-          recipesOccurrences: JSON.stringify(
-            ingredient.recipesOccurrences || []
-          ),
-          pFrais: ingredient.pFrais || false,
-          pSurgel: ingredient.pSurgel || false,
-          nbRecipes: ingredient.nbRecipes || 0,
-          totalAssiettes: ingredient.totalAssiettes || 0,
-          conversionRules: ingredient.conversionRules || null,
-        }));
+      for (let i = 0; i < ingredients.length; i += productsPerTransaction) {
+        const transactionIngredients = ingredients.slice(
+          i,
+          i + productsPerTransaction
+        );
+        const transactionNumber = Math.floor(i / productsPerTransaction) + 1;
 
-        // Utiliser createOperations avec bulkCreate pour contourner la limite de 100 opérations
+        // Créer une nouvelle transaction pour ce lot de produits
         log(
-          `[Appwrite Function] Création du lot ${batchNumber}/${totalBatches} (${productsData.length} produits) via createOperations...`
+          `[Appwrite Function] Création de la transaction ${transactionNumber}/${totalTransactions} pour ${transactionIngredients.length} produits...`
         );
 
-        const operations = [
-          {
-            action: 'bulkCreate',
+        const productTransaction = await tablesDB.createTransaction({
+          ttl: 120, // 2 minutes
+        });
+
+        allTransactions.push(productTransaction.$id);
+        log(
+          `[Appwrite Function] Transaction ${transactionNumber} créée: ${productTransaction.$id}`
+        );
+
+        // Créer chaque produit individuellement dans cette transaction
+        for (const ingredient of transactionIngredients) {
+          const productData = {
+            $id: `${ingredient.ingredientHugoUuid}_${eventId}`,
+            productHugoUuid: ingredient.ingredientHugoUuid || '',
+            productName: ingredient.ingredientName || '',
+            productType: ingredient.ingType || '',
+            mainId: eventId,
+            totalNeededConsolidated: JSON.stringify(
+              ingredient.totalNeededConsolidated || []
+            ),
+            totalNeededRaw: JSON.stringify(ingredient.totalNeededRaw || []),
+            neededConsolidatedByDate: JSON.stringify(
+              ingredient.neededConsolidatedByDate || []
+            ),
+            recipesOccurrences: JSON.stringify(
+              ingredient.recipesOccurrences || []
+            ),
+            pFrais: ingredient.pFrais || false,
+            pSurgel: ingredient.pSurgel || false,
+            nbRecipes: ingredient.nbRecipes || 0,
+            totalAssiettes: ingredient.totalAssiettes || 0,
+            conversionRules: ingredient.conversionRules || null,
+          };
+
+          await tablesDB.createRow({
             databaseId: process.env.DATABASE_ID,
             tableId: process.env.COLLECTION_PRODUCTS,
-            data: productsData,
-          },
-        ];
+            rowId: productData.$id,
+            data: productData,
+            permissions: undefined,
+            transactionId: productTransaction.$id,
+          });
+        }
 
-        await tablesDB.createOperations(operations, transactionId);
+        // Valider la transaction de produits
+        await tablesDB.updateTransaction({
+          transactionId: productTransaction.$id,
+          commit: true,
+        });
 
         log(
-          `[Appwrite Function] Lot ${batchNumber}/${totalBatches} créé avec succès via bulkCreate`
+          `[Appwrite Function] Transaction ${transactionNumber}/${totalTransactions} validée avec succès (${transactionIngredients.length} produits)`
         );
       }
 
       log(
-        `[Appwrite Function] ${ingredients.length} produits créés dans la transaction (${totalBatches} lot(s))`
+        `[Appwrite Function] ${ingredients.length} produits créés avec succès (${totalTransactions} transaction(s))`
       );
     }
 
-    // 7. Valider (commit) la transaction
-    await tablesDB.updateTransaction({
-      transactionId: transactionId,
-      commit: true,
-    });
-
-    log(`[Appwrite Function] Transaction validée avec succès`);
+    // 7. Toutes les transactions sont déjà validées individuellement
+    log(
+      `[Appwrite Function] Toutes les transactions ont été validées avec succès`
+    );
 
     return res.json({
       success: true,
       eventId,
-      transactionId,
-      message: 'Liste de produits créée avec succès (transaction validée)',
+      totalTransactions: allTransactions.length,
+      transactionIds: allTransactions,
+      message:
+        'Liste de produits créée avec succès (multi-transactions validées)',
     });
   } catch (err) {
     error(`[Appwrite Function] Erreur lors de la création: ${err.message}`);
     error(`[Appwrite Function] Stack: ${err.stack}`);
 
-    // En cas d'erreur, annuler la transaction si elle existe
-    if (transactionId) {
-      try {
-        await TablesDB.updateTransaction({
-          transactionId: transactionId,
-          rollback: true,
-        });
-        log(`[Appwrite Function] Transaction annulée (rollback)`);
-      } catch (rollbackError) {
-        error(
-          `[Appwrite Function] Erreur lors du rollback: ${rollbackError.message}`
-        );
+    // En cas d'erreur, annuler toutes les transactions existantes
+    if (allTransactions.length > 0) {
+      for (const transactionId of allTransactions) {
+        try {
+          await tablesDB.updateTransaction({
+            transactionId: transactionId,
+            rollback: true,
+          });
+          log(
+            `[Appwrite Function] Transaction ${transactionId} annulée (rollback)`
+          );
+        } catch (rollbackError) {
+          error(
+            `[Appwrite Function] Erreur lors du rollback de ${transactionId}: ${rollbackError.message}`
+          );
+        }
       }
     }
 
@@ -187,7 +221,8 @@ export default async ({ req, res, log, error }) => {
       {
         error: err.message || 'Erreur interne du serveur',
         code: err.code,
-        rolledBack: !!transactionId,
+        rolledBack: allTransactions.length > 0,
+        transactionsCount: allTransactions.length,
       },
       500
     );
