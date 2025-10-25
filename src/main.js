@@ -1,4 +1,4 @@
-import { Client, Databases } from 'node-appwrite';
+import { Client, TablesDB } from 'node-appwrite';
 
 /**
  * Fonction Appwrite pour créer une liste de produits transactionnelle
@@ -43,29 +43,9 @@ export default async ({ req, res, log, error }) => {
       .setProject(process.env.APPWRITE_PROJECT_ID)
       .setKey(process.env.APPWRITE_API_KEY);
 
-    const tablesDB = new Databases(client);
+    const tablesDB = new TablesDB(client);
 
-    // 3. Vérification que l'événement n'existe pas déjà
-    log(`[Appwrite Function] Vérification de l'existence de ${eventId}...`);
-    try {
-      await tablesDB.getRow({
-        databaseId: process.env.DATABASE_ID,
-        tableId: process.env.COLLECTION_MAIN,
-        rowId: eventId
-      });
-      log(
-        `[Appwrite Function] L'événement ${eventId} existe déjà dans main`
-      );
-      return res.json(
-        { error: 'Cet événement existe déjà', code: 'already_exists' },
-        409
-      );
-    } catch (err) {
-      if (err.code !== 404) {
-        throw err;
-      }
-      // 404 = document n'existe pas, c'est ce qu'on veut
-    }
+ 
 
     // 4. Créer une transaction
     log(`[Appwrite Function] Création de la transaction...`);
