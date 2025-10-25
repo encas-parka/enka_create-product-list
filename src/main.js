@@ -14,6 +14,10 @@ import { Client, TablesDB } from 'node-appwrite';
  */
 
 export default async ({ req, res, log, error }) => {
+  // Déclarer variables en dehors du try pour être accessibles dans le catch
+  let allTransactions = [];
+  let tablesDB = null;
+
   try {
     // 1. Parse le body JSON
     const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
@@ -41,11 +45,10 @@ export default async ({ req, res, log, error }) => {
       .setProject(process.env.APPWRITE_PROJECT_ID)
       .setKey(process.env.APPWRITE_API_KEY);
 
-    const tablesDB = new TablesDB(client);
+    tablesDB = new TablesDB(client);
 
     // 4. Variables pour les transactions
     const maxOperationsPerTransaction = 99; // Free tier limite
-    let allTransactions = [];
 
     log(`[Appwrite Function] Début de la création multi-transactions...`);
 
