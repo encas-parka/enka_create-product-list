@@ -1,4 +1,4 @@
-import { Client, Databases } from 'node-appwrite';
+import { Client, Databases, Users } from 'node-appwrite';
 
 /**
  * Fonction Appwrite pour créer une liste de produits transactionnelle
@@ -13,12 +13,15 @@ import { Client, Databases } from 'node-appwrite';
  * - COLLECTION_PRODUCTS
  */
 
-export default async function createProductsList(req, res) {
+export default async function createProductsList({ req, res, log, error }) {
   let transactionId = null;
   
   try {
-    // 1. Validation des données d'entrée
-    const { eventId, eventData, contentHash, userId } = req.body;
+    // 1. Parse le body JSON
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    
+    // 2. Validation des données d'entrée
+    const { eventId, eventData, contentHash, userId } = body;
 
     if (!eventId || !eventData || !contentHash || !userId) {
       return res.json(
@@ -30,7 +33,7 @@ export default async function createProductsList(req, res) {
       );
     }
 
-    console.log(
+    log(
       `[Appwrite Function] Début de création pour l'événement ${eventId} par ${userId}`
     );
 
@@ -49,16 +52,16 @@ export default async function createProductsList(req, res) {
         process.env.COLLECTION_MAIN,
         eventId
       );
-      console.log(
+      log(
         `[Appwrite Function] L'événement ${eventId} existe déjà dans main`
       );
       return res.json(
         { error: 'Cet événement existe déjà', code: 'already_exists' },
         409
       );
-    } catch (error) {
-      if (error.code !== 404) {
-        throw error;
+    } catch (err) {
+      if (err.code !== 404) {
+        throw err;
       }
       // 404 = document n'existe pas, c'est ce qu'on veut
     }
@@ -69,7 +72,7 @@ export default async function createProductsList(req, res) {
     });
     
     transactionId = transaction.$id;
-    console.log(`[Appwrite Function] Transaction créée: ${transactionId}`);
+    log(`[Appwrite Function] Transaction créée: ${transactionId}`);
 
     // 5. Créer le document main dans la transaction
     await databases.createDocument(
@@ -89,7 +92,7 @@ export default async function createProductsList(req, res) {
       transactionId // Lier à la transaction
     );
 
-    console.log(`[Appwrite Function] Document main créé dans la transaction`);
+    log(`[Appwrite Function] Document main créé dans la transaction`);
 
     // 6. Créer tous les produits en bulk dans la transaction
     if (eventData.ingredients && Array.isArray(eventData.ingredients)) {
@@ -125,7 +128,7 @@ export default async function createProductsList(req, res) {
         transactionId // Lier à la transaction
       );
 
-      console.log(
+      log(
         `[Appwrite Function] ${productsData.length} produits créés dans la transaction`
       );
     }
@@ -136,7 +139,7 @@ export default async function createProductsList(req, res) {
       'commit' // ou 'rollback' pour annuler
     );
 
-    console.log(`[Appwrite Function] Transaction validée avec succès`);
+    log(`[Appwrite Function] Transaction validée avec succès`);
 
     return res.json({
       success: true,
@@ -145,27 +148,25 @@ export default async function createProductsList(req, res) {
       message: 'Liste de produits créée avec succès (transaction validée)',
     });
     
-  } catch (error) {
-    console.error(
-      `[Appwrite Function] Erreur lors de la création:`,
-      error.message
+  } catch (err) {
+    error(
+      `[Appwrite Function] Erreur lors de la création: ${err.message}`
     );
 
     // En cas d'erreur, annuler la transaction si elle existe
     if (transactionId) {
       try {
         await databases.updateTransaction(transactionId, 'rollback');
-        console.log(`[Appwrite Function] Transaction annulée (rollback)`);
+        log(`[Appwrite Function] Transaction annulée (rollback)`);
       } catch (rollbackError) {
-        console.error(
-          `[Appwrite Function] Erreur lors du rollback:`,
-          rollbackError.message
+        error(
+          `[Appwrite Function] Erreur lors du rollback: ${rollbackError.message}`
         );
       }
     }
 
     // Gestion des erreurs spécifiques
-    if (error.code === 409 || error.code === 'document_already_exists') {
+    if (err.code === 409 || err.code === 'document_already_exists') {
       return res.json(
         {
           error:
@@ -178,8 +179,8 @@ export default async function createProductsList(req, res) {
 
     return res.json(
       { 
-        error: error.message || 'Erreur interne du serveur', 
-        code: error.code,
+        error: err.message || 'Erreur interne du serveur', 
+        code: err.code,
         rolledBack: !!transactionId 
       },
       500
