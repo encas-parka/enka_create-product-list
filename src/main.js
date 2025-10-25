@@ -1,4 +1,4 @@
-const { Client, TablesDB, Users } = require('node-appwrite');
+import { Client, TablesDB } from 'node-appwrite';
 
 /**
  * Fonction Appwrite pour créer une liste de produits transactionnelle
@@ -13,7 +13,7 @@ const { Client, TablesDB, Users } = require('node-appwrite');
  * - COLLECTION_PRODUCTS
  */
 
-module.exports = async function createProductsList({ req, res, log, error: logError }) {
+export default async ({ req, res, log, error }) => {
   let transactionId = null;
   
   try {
@@ -156,10 +156,10 @@ module.exports = async function createProductsList({ req, res, log, error: logEr
     });
     
   } catch (err) {
-    logError(
+    error(
       `[Appwrite Function] Erreur lors de la création: ${err.message}`
     );
-    logError(`[Appwrite Function] Stack: ${err.stack}`);
+    error(`[Appwrite Function] Stack: ${err.stack}`);
 
     // En cas d'erreur, annuler la transaction si elle existe
     if (transactionId) {
@@ -170,7 +170,7 @@ module.exports = async function createProductsList({ req, res, log, error: logEr
         });
         log(`[Appwrite Function] Transaction annulée (rollback)`);
       } catch (rollbackError) {
-        logError(
+        error(
           `[Appwrite Function] Erreur lors du rollback: ${rollbackError.message}`
         );
       }
