@@ -113,17 +113,21 @@ export default async ({ req, res, log, error }) => {
           conversionRules: ingredient.conversionRules || null,
         }));
 
-        // Créer le lot dans la transaction
+        // Créer les produits individuellement dans la transaction
         log(
           `[Appwrite Function] Création du lot ${batchNumber}/${totalBatches} (${productsData.length} produits)...`
         );
-        await tablesDB.createRows({
-          databaseId: process.env.DATABASE_ID,
-          tableId: process.env.COLLECTION_PRODUCTS,
-          rows: productsData,
-          permissions: undefined,
-          transactionId: transactionId,
-        });
+
+        for (const productData of productsData) {
+          await tablesDB.createRow({
+            databaseId: process.env.DATABASE_ID,
+            tableId: process.env.COLLECTION_PRODUCTS,
+            rowId: productData.$id,
+            data: productData,
+            permissions: undefined,
+            transactionId: transactionId,
+          });
+        }
 
         log(
           `[Appwrite Function] Lot ${batchNumber}/${totalBatches} créé avec succès`
