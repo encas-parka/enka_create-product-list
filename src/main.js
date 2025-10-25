@@ -113,24 +113,26 @@ export default async ({ req, res, log, error }) => {
           conversionRules: ingredient.conversionRules || null,
         }));
 
-        // Créer les produits individuellement dans la transaction
+        // Utiliser createOperations avec bulkCreate pour contourner la limite de 100 opérations
         log(
-          `[Appwrite Function] Création du lot ${batchNumber}/${totalBatches} (${productsData.length} produits)...`
+          `[Appwrite Function] Création du lot ${batchNumber}/${totalBatches} (${productsData.length} produits) via createOperations...`
         );
 
-        for (const productData of productsData) {
-          await tablesDB.createRow({
+        const operations = [
+          {
+            action: 'bulkCreate',
             databaseId: process.env.DATABASE_ID,
             tableId: process.env.COLLECTION_PRODUCTS,
-            rowId: productData.$id,
-            data: productData,
-            permissions: undefined,
-            transactionId: transactionId,
-          });
-        }
+            data: productsData,
+          },
+        ];
+
+        await tablesDB.createOperations(operations, {
+          transactionId: transactionId,
+        });
 
         log(
-          `[Appwrite Function] Lot ${batchNumber}/${totalBatches} créé avec succès`
+          `[Appwrite Function] Lot ${batchNumber}/${totalBatches} créé avec succès via bulkCreate`
         );
       }
 
