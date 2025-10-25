@@ -1,7 +1,9 @@
-import { Client, Databases } from "node-appwrite";
+import { Client, Databases } from 'node-appwrite';
 
 /**
  * Fonction Appwrite pour créer une liste de produits transactionnelle
+ * Utilise l'API Transactions pour garantir l'atomicité complète
+ *
  * Variables d'environnement requises:
  * - APPWRITE_API_KEY (clé API avec permissions admin)
  * - APPWRITE_ENDPOINT
@@ -11,51 +13,28 @@ import { Client, Databases } from "node-appwrite";
  * - COLLECTION_PRODUCTS
  */
 
-export default async ({ req, res, log, error }) => {
+export default async function createProductsList(req, res) {
+  let transactionId = null;
+  
   try {
-    log("Début de l'exécution");
-    log("Body reçu: " + req.bodyText);
+    // 1. Validation des données d'entrée
+    const { eventId, eventData, contentHash, userId } = req.body;
 
-    // 1. Parser les données d'entrée
-    if (!req.bodyText) {
-      error("Aucun body reçu dans la requête");
-      return res.json({ error: "Aucun body reçu" }, 400);
-    }
-
-    let inputData;
-    try {
-      inputData = JSON.parse(req.bodyText);
-    } catch (parseError) {
-      error("Erreur lors du parsing JSON: " + parseError.message);
-      return res.json({ error: "Body JSON invalide" }, 400);
-    }
-
-    const { eventId, eventData, contentHash, userId } = inputData;
-
-    log(
-      `Données parsées - eventId: ${eventId}, userId: ${userId}, hasEventData: ${!!eventData}`
-    );
-
-    // 2. Validation des données d'entrée
     if (!eventId || !eventData || !contentHash || !userId) {
-      error(
-        `Données manquantes: eventId=${!!eventId}, eventData=${!!eventData}, contentHash=${!!contentHash}, userId=${!!userId}`
-      );
       return res.json(
         {
           error:
-            "Données manquantes: eventId, eventData, contentHash, userId requis",
+            'Données manquantes: eventId, eventData, contentHash, userId requis',
         },
         400
       );
     }
 
-    log(
-      `Début de création pour l'événement ${eventId} par ${userId}`
+    console.log(
+      `[Appwrite Function] Début de création pour l'événement ${eventId} par ${userId}`
     );
 
-    // 3. Initialisation du client Appwrite côté serveur
-    // Utiliser la clé API stockée en variable d'environnement
+    // 2. Initialisation du client Appwrite côté serveur
     const client = new Client()
       .setEndpoint(process.env.APPWRITE_ENDPOINT)
       .setProject(process.env.APPWRITE_PROJECT_ID)
@@ -63,27 +42,36 @@ export default async ({ req, res, log, error }) => {
 
     const databases = new Databases(client);
 
-    // 4. Vérification que l'événement n'existe pas déjà
+    // 3. Vérification que l'événement n'existe pas déjà
     try {
       await databases.getDocument(
         process.env.DATABASE_ID,
         process.env.COLLECTION_MAIN,
         eventId
       );
-      log(`L'événement ${eventId} existe déjà dans main`);
+      console.log(
+        `[Appwrite Function] L'événement ${eventId} existe déjà dans main`
+      );
       return res.json(
-        { error: "Cet événement existe déjà", code: "already_exists" },
+        { error: 'Cet événement existe déjà', code: 'already_exists' },
         409
       );
-    } catch (checkError) {
-      if (checkError.code !== 404) {
-        throw checkError;
+    } catch (error) {
+      if (error.code !== 404) {
+        throw error;
       }
       // 404 = document n'existe pas, c'est ce qu'on veut
     }
 
-    // 5. Créer le document main
-    log("Création du document main...");
+    // 4. Créer une transaction (TTL par défaut: 60 secondes)
+    const transaction = await databases.createTransaction({
+      ttl: 120 // 2 minutes pour laisser le temps aux opérations
+    });
+    
+    transactionId = transaction.$id;
+    console.log(`[Appwrite Function] Transaction créée: ${transactionId}`);
+
+    // 5. Créer le document main dans la transaction
     await databases.createDocument(
       process.env.DATABASE_ID,
       process.env.COLLECTION_MAIN,
@@ -93,33 +81,23 @@ export default async ({ req, res, log, error }) => {
         originalDataHash: contentHash,
         isActive: true,
         createdBy: userId,
-        status: "active",
+        status: 'active',
         error: null,
         allDates: eventData.allDates || [],
       },
-      [
-        `read("user:${userId}")`,
-        `update("user:${userId}")`,
-        `delete("user:${userId}")`,
-      ]
+      undefined, // permissions
+      transactionId // Lier à la transaction
     );
-    log("Document main créé avec succès");
 
-    // 6. Créer tous les produits en bulk avec createDocuments
+    console.log(`[Appwrite Function] Document main créé dans la transaction`);
+
+    // 6. Créer tous les produits en bulk dans la transaction
     if (eventData.ingredients && Array.isArray(eventData.ingredients)) {
-      log(`Création de ${eventData.ingredients.length} produits en bulk...`);
-      
-      const productsDocuments = eventData.ingredients.map((ingredient) => ({
+      const productsData = eventData.ingredients.map((ingredient) => ({
         $id: `${ingredient.ingredientHugoUuid}_${eventId}`,
-        $permissions: [
-          `read("user:${userId}")`,
-          `update("user:${userId}")`,
-          `delete("user:${userId}")`,
-        ],
-        productHugoUuid:
-          ingredient.ingredientHugoUuid || Math.random().toString(36),
-        productName: ingredient.ingredientName || "",
-        productType: ingredient.ingType || "",
+        productHugoUuid: ingredient.ingredientHugoUuid || '',
+        productName: ingredient.ingredientName || '',
+        productType: ingredient.ingType || '',
         mainId: eventId,
         totalNeededConsolidated: JSON.stringify(
           ingredient.totalNeededConsolidated || []
@@ -135,53 +113,76 @@ export default async ({ req, res, log, error }) => {
         pSurgel: ingredient.pSurgel || false,
         nbRecipes: ingredient.nbRecipes || 0,
         totalAssiettes: ingredient.totalAssiettes || 0,
-        conversionRules: ingredient.conversionRules,
+        conversionRules: ingredient.conversionRules || null,
       }));
-      
-      await databases.createDocuments(
+
+      // Utiliser createRows avec transactionId
+      await databases.createRows(
         process.env.DATABASE_ID,
         process.env.COLLECTION_PRODUCTS,
-        productsDocuments
+        productsData,
+        undefined, // permissions
+        transactionId // Lier à la transaction
       );
-      
-      log(`${eventData.ingredients.length} produits créés avec succès en bulk`);
+
+      console.log(
+        `[Appwrite Function] ${productsData.length} produits créés dans la transaction`
+      );
     }
+
+    // 7. Valider (commit) la transaction
+    await databases.updateTransaction(
+      transactionId,
+      'commit' // ou 'rollback' pour annuler
+    );
+
+    console.log(`[Appwrite Function] Transaction validée avec succès`);
 
     return res.json({
       success: true,
       eventId,
-      message: "Liste de produits créée avec succès",
+      transactionId,
+      message: 'Liste de produits créée avec succès (transaction validée)',
     });
-  } catch (err) {
-    error(`Erreur lors de la création: ${err.message}`);
-    error(`Stack: ${err.stack}`);
+    
+  } catch (error) {
+    console.error(
+      `[Appwrite Function] Erreur lors de la création:`,
+      error.message
+    );
 
-    if (err.code === "conflict") {
+    // En cas d'erreur, annuler la transaction si elle existe
+    if (transactionId) {
+      try {
+        await databases.updateTransaction(transactionId, 'rollback');
+        console.log(`[Appwrite Function] Transaction annulée (rollback)`);
+      } catch (rollbackError) {
+        console.error(
+          `[Appwrite Function] Erreur lors du rollback:`,
+          rollbackError.message
+        );
+      }
+    }
+
+    // Gestion des erreurs spécifiques
+    if (error.code === 409 || error.code === 'document_already_exists') {
       return res.json(
         {
           error:
-            "Conflit détecté: les données ont été modifiées par une autre opération",
-          code: "conflict",
+            'Conflit détecté: un ou plusieurs documents existent déjà',
+          code: 'conflict',
         },
         409
-      );
-    } else if (err.code === "transaction_limit_exceeded") {
-      return res.json(
-        {
-          error:
-            "Limite de transactions dépassée. Veuillez réduire le nombre d'ingrédients",
-          code: "transaction_limit_exceeded",
-        },
-        429
       );
     }
 
     return res.json(
-      {
-        error: err.message || "Erreur interne du serveur",
-        code: err.code,
+      { 
+        error: error.message || 'Erreur interne du serveur', 
+        code: error.code,
+        rolledBack: !!transactionId 
       },
       500
     );
   }
-};
+}
