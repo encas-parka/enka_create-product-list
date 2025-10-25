@@ -1,4 +1,4 @@
-import { Client, TablesDB } from 'node-appwrite';
+import { Client, Databases } from 'node-appwrite';
 
 /**
  * Fonction Appwrite pour créer une liste de produits transactionnelle
@@ -43,7 +43,7 @@ export default async ({ req, res, log, error }) => {
       .setProject(process.env.APPWRITE_PROJECT_ID)
       .setKey(process.env.APPWRITE_API_KEY);
 
-    const tablesDB = new TablesDB(client);
+    const tablesDB = new Databases(client);
 
     // 3. Vérification que l'événement n'existe pas déjà
     log(`[Appwrite Function] Vérification de l'existence de ${eventId}...`);
