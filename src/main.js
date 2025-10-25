@@ -124,11 +124,10 @@ export default async ({ req, res, log, error }) => {
             databaseId: process.env.DATABASE_ID,
             tableId: process.env.COLLECTION_PRODUCTS,
             data: productsData,
-            transactionId: transactionId,
           },
         ];
 
-        await tablesDB.createOperations(operations);
+        await tablesDB.createOperations(operations, transactionId);
 
         log(
           `[Appwrite Function] Lot ${batchNumber}/${totalBatches} créé avec succès via bulkCreate`
