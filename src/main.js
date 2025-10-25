@@ -1,4 +1,4 @@
-import { Client, TablesDB, Users } from 'node-appwrite';
+const { Client, TablesDB, Users } = require('node-appwrite');
 
 /**
  * Fonction Appwrite pour créer une liste de produits transactionnelle
@@ -13,7 +13,7 @@ import { Client, TablesDB, Users } from 'node-appwrite';
  * - COLLECTION_PRODUCTS
  */
 
-export default async function createProductsList({ req, res, log, error: logError }) {
+module.exports = async function createProductsList({ req, res, log, error: logError }) {
   let transactionId = null;
   
   try {
@@ -197,4 +197,4 @@ export default async function createProductsList({ req, res, log, error: logErro
       500
     );
   }
-}
+};
