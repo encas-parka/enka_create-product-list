@@ -1,4 +1,4 @@
-import { Client, TablesDB } from 'node-appwrite';
+import { Client, Tables, ID } from 'node-appwrite';
 
 /**
  * Fonction Appwrite pour créer une liste de produits transactionnelle
@@ -13,249 +13,193 @@ import { Client, TablesDB } from 'node-appwrite';
  * - COLLECTION_PRODUCTS
  */
 
-export default async ({ req, res, log, error }) => {
-  // Déclarer variables en dehors du try pour être accessibles dans le catch
-  let allTransactions = [];
-  let tablesDB = null;
+export default async function ({ req, res, log, error }) {
+  const client = new Client()
+    .setEndpoint(process.env.APPWRITE_ENDPOINT)
+    .setProject(process.env.APPWRITE_PROJECT_ID)
+    .setKey(process.env.APPWRITE_API_KEY);
+
+  const databases = new Tables(client);
+
+  // Parser le corps de la requête
+  let payload;
+  try {
+    payload = JSON.parse(req.body);
+  } catch (e) {
+    return res.json({ error: 'Invalid JSON payload' }, 400);
+  }
+
+  const { operation, data } = payload;
 
   try {
-    // 1. Parse le body JSON
-    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-
-    // 2. Validation des données d'entrée
-    const { eventId, eventData, contentHash, userId } = body;
-
-    if (!eventId || !eventData || !contentHash || !userId) {
-      return res.json(
-        {
-          error:
-            'Données manquantes: eventId, eventData, contentHash, userId requis',
-        },
-        400
-      );
+    switch (operation) {
+      case 'batchUpdateProducts':
+        return await handleBatchUpdateProducts(databases, data, log, error);
+      default:
+        return res.json({ error: 'Unknown operation' }, 400);
     }
+  } catch (e) {
+    error(e.message);
+    return res.json({ error: e.message }, 500);
+  }
+}
 
-    log(
-      `[Appwrite Function] Début de création pour l'événement ${eventId} par ${userId}`
-    );
+/**
+ * Met à jour plusieurs produits en utilisant une transaction Appwrite
+ * @param {Tables} databases - Instance Appwrite Tables
+ * @param {Object} data - Données de la mise à jour groupée
+ * @param {Function} log - Logger
+ * @param {Function} error - Error logger
+ * @returns {Object} Résultat de l'opération
+ */
+async function handleBatchUpdateProducts(databases, data, log, error) {
+  const { productIds, updateType, updateData, options = {} } = data;
 
-    // 2. Initialisation du client Appwrite côté serveur
-    const client = new Client()
-      .setEndpoint(process.env.APPWRITE_ENDPOINT)
-      .setProject(process.env.APPWRITE_PROJECT_ID)
-      .setKey(process.env.APPWRITE_API_KEY);
-
-    tablesDB = new TablesDB(client);
-
-    // 4. Variables pour les transactions
-    const maxOperationsPerTransaction = 99; // Free tier limite
-
-    log(`[Appwrite Function] Début de la création multi-transactions...`);
-
-    // 5. Créer le document main dans sa propre transaction
-    log(
-      `[Appwrite Function] Création de la transaction pour le document main...`
-    );
-
-    const mainTransaction = await tablesDB.createTransaction({
-      ttl: 120, // 2 minutes
-    });
-
-    allTransactions.push(mainTransaction.$id);
-    log(`[Appwrite Function] Transaction main créée: ${mainTransaction.$id}`);
-
-    await tablesDB.createRow({
-      databaseId: process.env.DATABASE_ID,
-      tableId: process.env.COLLECTION_MAIN,
-      rowId: eventId,
-      data: {
-        name: eventData.name || `Événement ${eventId}`,
-        originalDataHash: contentHash,
-        isActive: true,
-        createdBy: userId,
-        status: 'active',
-        error: null,
-        allDates: eventData.allDates || [],
+  if (!productIds?.length || !updateType || !updateData) {
+    return res.json(
+      {
+        error:
+          'Missing required parameters: productIds, updateType, updateData',
       },
-      permissions: undefined,
-      transactionId: mainTransaction.$id,
-    });
-
-    // Attendre que la transaction main soit prête
-    log(`[Appwrite Function] Attente de la transaction main...`);
-    await new Promise((resolve) => setTimeout(resolve, 2000)); // 2 secondes
-
-    // Valider la transaction du document main
-    await tablesDB.updateTransaction({
-      transactionId: mainTransaction.$id,
-      commit: true,
-    });
-
-    log(`[Appwrite Function] Transaction main validée avec succès`);
-
-    // 6. Créer tous les produits en utilisant plusieurs transactions (99 produits max par transaction)
-    if (eventData.ingredients && Array.isArray(eventData.ingredients)) {
-      const ingredients = eventData.ingredients;
-      const productsPerTransaction = maxOperationsPerTransaction;
-      const totalTransactions = Math.ceil(
-        ingredients.length / productsPerTransaction
-      );
-
-      log(
-        `[Appwrite Function] Préparation de ${ingredients.length} produits en ${totalTransactions} transaction(s) de ${productsPerTransaction} produits max...`
-      );
-
-      for (let i = 0; i < ingredients.length; i += productsPerTransaction) {
-        const transactionIngredients = ingredients.slice(
-          i,
-          i + productsPerTransaction
-        );
-        const transactionNumber = Math.floor(i / productsPerTransaction) + 1;
-
-        // Créer une nouvelle transaction pour ce lot de produits
-        log(
-          `[Appwrite Function] Création de la transaction ${transactionNumber}/${totalTransactions} pour ${transactionIngredients.length} produits...`
-        );
-
-        const productTransaction = await tablesDB.createTransaction({
-          ttl: 120, // 2 minutes
-        });
-
-        allTransactions.push(productTransaction.$id);
-        log(
-          `[Appwrite Function] Transaction ${transactionNumber} créée: ${productTransaction.$id}`
-        );
-
-        // Créer chaque produit individuellement dans cette transaction
-        for (const ingredient of transactionIngredients) {
-          const productData = {
-            $id: `${ingredient.ingredientHugoUuid}_${eventId}`,
-            productHugoUuid: ingredient.ingredientHugoUuid || '',
-            productName: ingredient.ingredientName || '',
-            productType: ingredient.ingType || '',
-            mainId: eventId,
-            totalNeededRaw: JSON.stringify(ingredient.totalNeededRaw || []),
-            occ: JSON.stringify(ingredient.occ || []), // Format optimisé compressé recipeOccurrence
-            pFrais: ingredient.pFrais || false,
-            pSurgel: ingredient.pSurgel || false,
-            nbRecipes: ingredient.nbRecipes || 0,
-            totalAssiettes: ingredient.totalAssiettes || 0,
-            conversionRules: ingredient.conversionRules || null,
-          };
-
-          await tablesDB.createRow({
-            databaseId: process.env.DATABASE_ID,
-            tableId: process.env.COLLECTION_PRODUCTS,
-            rowId: productData.$id,
-            data: productData,
-            permissions: undefined,
-            transactionId: productTransaction.$id,
-          });
-        }
-
-        // Attendre que la transaction soit prête avant de valider
-        log(
-          `[Appwrite Function] Attente de la transaction ${transactionNumber}...`
-        );
-        await new Promise((resolve) => setTimeout(resolve, 2000)); // 2 secondes
-
-        // Valider la transaction de produits
-        await tablesDB.updateTransaction({
-          transactionId: productTransaction.$id,
-          commit: true,
-        });
-
-        log(
-          `[Appwrite Function] Transaction ${transactionNumber}/${totalTransactions} validée avec succès (${transactionIngredients.length} produits)`
-        );
-      }
-
-      log(
-        `[Appwrite Function] ${ingredients.length} produits créés avec succès (${totalTransactions} transaction(s))`
-      );
-    }
-
-    // 7. Toutes les transactions sont déjà validées individuellement
-    log(
-      `[Appwrite Function] Toutes les transactions ont été validées avec succès`
+      400
     );
+  }
+
+  // Limiter le nombre d'opérations par transaction
+  const maxOperations = 100; // Plan Free Appwrite
+  if (productIds.length > maxOperations) {
+    return res.json(
+      {
+        error: `Too many products. Maximum ${maxOperations} operations per transaction`,
+      },
+      400
+    );
+  }
+
+  log(
+    `Starting batch update for ${productIds.length} products, type: ${updateType}`
+  );
+
+  try {
+    // 1. Créer la transaction
+    const transaction = await databases.createTransaction(
+      process.env.DATABASE_ID
+    );
+
+    log(`Transaction created: ${transaction.$id}`);
+
+    // 2. Préparer les opérations en fonction du type de mise à jour
+    const operations = productIds.map((productId) => {
+      const updatePayload = prepareUpdatePayload(
+        updateType,
+        updateData,
+        options
+      );
+
+      return {
+        action: 'update',
+        databaseId: process.env.DATABASE_ID,
+        collectionId: process.env.COLLECTION_PRODUCTS,
+        documentId: productId,
+        data: updatePayload,
+      };
+    });
+
+    // 3. Stager les opérations
+    await databases.createOperations(
+      process.env.DATABASE_ID,
+      transaction.$id,
+      operations
+    );
+
+    log(`Staged ${operations.length} operations`);
+
+    // 4. Commit la transaction
+    const result = await databases.updateTransaction(
+      process.env.DATABASE_ID,
+      transaction.$id,
+      'commit'
+    );
+
+    log(`Transaction committed successfully`);
 
     return res.json({
       success: true,
-      eventId,
-      totalTransactions: allTransactions.length,
-      transactionIds: allTransactions,
-      message:
-        'Liste de produits créée avec succès (multi-transactions validées)',
+      transactionId: transaction.$id,
+      updatedCount: productIds.length,
+      updateType,
+      timestamp: new Date().toISOString(),
     });
-  } catch (err) {
-    error(`[Appwrite Function] Erreur lors de la création: ${err.message}`);
-    error(`[Appwrite Function] Stack: ${err.stack}`);
+  } catch (transactionError) {
+    error(`Transaction failed: ${transactionError.message}`);
 
-    // En cas d'erreur, annuler toutes les transactions existantes
-    if (allTransactions.length > 0) {
-      // Attendre un peu avant de tenter le rollback (les transactions ont besoin de temps)
-      await new Promise((resolve) => setTimeout(resolve, 3000)); // 3 secondes
-
-      for (const transactionId of allTransactions) {
-        try {
-          // Plusieurs tentatives de rollback avec délai
-          let rollbackSuccess = false;
-          for (let attempt = 0; attempt < 3; attempt++) {
-            try {
-              await tablesDB.updateTransaction({
-                transactionId: transactionId,
-                rollback: true,
-              });
-              log(
-                `[Appwrite Function] Transaction ${transactionId} annulée (rollback) - tentative ${attempt + 1}`
-              );
-              rollbackSuccess = true;
-              break;
-            } catch (rollbackError) {
-              if (attempt < 2) {
-                log(
-                  `[Appwrite Function] Rollback échoué pour ${transactionId}, tentative ${attempt + 1}/3, nouvelle attente...`
-                );
-                await new Promise((resolve) => setTimeout(resolve, 2000)); // 2 secondes
-              } else {
-                throw rollbackError;
-              }
-            }
-          }
-
-          if (!rollbackSuccess) {
-            throw new Error(
-              `Rollback échoué après 3 tentatives pour ${transactionId}`
-            );
-          }
-        } catch (rollbackError) {
-          error(
-            `[Appwrite Function] Erreur finale lors du rollback de ${transactionId}: ${rollbackError.message}`
-          );
-        }
-      }
-    }
-
-    // Gestion des erreurs spécifiques
-    if (err.code === 409 || err.code === 'document_already_exists') {
-      return res.json(
-        {
-          error: 'Conflit détecté: un ou plusieurs documents existent déjà',
-          code: 'conflict',
-        },
-        409
+    // Tenter de rollback si possible
+    try {
+      await databases.updateTransaction(
+        process.env.DATABASE_ID,
+        transaction.$id,
+        'rollback'
       );
+      log('Transaction rolled back');
+    } catch (rollbackError) {
+      error(`Rollback failed: ${rollbackError.message}`);
     }
 
     return res.json(
       {
-        error: err.message || 'Erreur interne du serveur',
-        code: err.code,
-        rolledBack: allTransactions.length > 0,
-        transactionsCount: allTransactions.length,
+        success: false,
+        error: transactionError.message,
+        productIds: productIds.length,
       },
       500
     );
   }
-};
+}
+
+/**
+ * Prépare le payload de mise à jour en fonction du type
+ * @param {string} updateType - Type de mise à jour (store, who, etc.)
+ * @param {*} updateData - Données de mise à jour
+ * @param {Object} options - Options supplémentaires
+ * @returns {Object} Payload pour Appwrite
+ */
+function prepareUpdatePayload(updateType, updateData, options) {
+  switch (updateType) {
+    case 'store':
+      // updateData: { storeName: string, storeComment?: string }
+      return {
+        store: JSON.stringify(updateData),
+      };
+
+    case 'who':
+      // updateData: { names: string[], mode: 'replace'|'add' }
+      if (options.mode === 'add') {
+        // Pour le mode 'add', on doit récupérer les valeurs existantes
+        // et ajouter les nouvelles (logique gérée côté client)
+        return {
+          who: updateData.names,
+        };
+      } else {
+        // Mode 'replace'
+        return {
+          who: updateData.names,
+        };
+      }
+
+    case 'stock':
+      // updateData: { quantity: number, unit: string, notes?: string }
+      return {
+        stockReel: JSON.stringify([
+          {
+            quantity: updateData.quantity.toString(),
+            unit: updateData.unit,
+            notes: updateData.notes || '',
+            dateTime: new Date().toISOString(),
+          },
+        ]),
+      };
+
+    default:
+      throw new Error(`Unsupported update type: ${updateType}`);
+  }
+}
