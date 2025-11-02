@@ -34,7 +34,13 @@ export default async function ({ req, res, log, error }) {
   try {
     switch (operation) {
       case 'batchUpdateProducts':
-        return await handleBatchUpdateProducts(databases, data, log, error);
+        return await handleBatchUpdateProducts(
+          databases,
+          data,
+          log,
+          error,
+          res
+        );
       default:
         return res.json({ error: 'Unknown operation' }, 400);
     }
@@ -52,7 +58,7 @@ export default async function ({ req, res, log, error }) {
  * @param {Function} error - Error logger
  * @returns {Object} Résultat de l'opération
  */
-async function handleBatchUpdateProducts(databases, data, log, error) {
+async function handleBatchUpdateProducts(databases, data, log, error, res) {
   const { productIds, updateType, updateData, options = {} } = data;
 
   if (!productIds?.length || !updateType || !updateData) {
@@ -80,10 +86,13 @@ async function handleBatchUpdateProducts(databases, data, log, error) {
     `Starting batch update for ${productIds.length} products, type: ${updateType}`
   );
 
+  let transaction = null;
+
   try {
-    // 1. Créer la transaction
-    const transaction = await databases.createTransaction(
-      process.env.DATABASE_ID
+    // 1. Créer la transaction avec TTL (60-3600 secondes)
+    transaction = await databases.createTransaction(
+      process.env.DATABASE_ID,
+      300 // TTL de 5 minutes (300 secondes)
     );
 
     log(`Transaction created: ${transaction.$id}`);
