@@ -1,4 +1,4 @@
-import { Client, Tables, ID } from 'node-appwrite';
+import { Client, TablesDB, ID } from 'node-appwrite';
 
 /**
  * Fonction Appwrite pour créer une liste de produits transactionnelle
@@ -19,7 +19,7 @@ export default async function ({ req, res, log, error }) {
     .setProject(process.env.APPWRITE_PROJECT_ID)
     .setKey(process.env.APPWRITE_API_KEY);
 
-  const databases = new Tables(client);
+  const databases = new TablesDB(client);
 
   // Parser le corps de la requête
   let payload;
@@ -46,7 +46,7 @@ export default async function ({ req, res, log, error }) {
 
 /**
  * Met à jour plusieurs produits en utilisant une transaction Appwrite
- * @param {Tables} databases - Instance Appwrite Tables
+ * @param {TablesDB} databases - Instance Appwrite TablesDB
  * @param {Object} data - Données de la mise à jour groupée
  * @param {Function} log - Logger
  * @param {Function} error - Error logger
