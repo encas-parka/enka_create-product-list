@@ -89,8 +89,8 @@ async function handleBatchUpdateProducts(databases, data, log, error, res) {
   let transaction = null;
 
   try {
-    // 1. Créer la transaction
-    transaction = await databases.createTransaction(process.env.DATABASE_ID);
+    // 1. Créer la transaction (sans paramètres dans le SDK 20.0.0)
+    transaction = await databases.createTransaction();
 
     log(`Transaction created: ${transaction.$id}`);
 
@@ -105,18 +105,18 @@ async function handleBatchUpdateProducts(databases, data, log, error, res) {
       return {
         action: 'update',
         databaseId: process.env.DATABASE_ID,
-        collectionId: process.env.COLLECTION_PRODUCTS,
-        documentId: productId,
+        tableId: process.env.COLLECTION_PRODUCTS,
+        rowId: productId,
         data: updatePayload,
       };
     });
 
-    // 3. Stager les opérations
-    await databases.createOperations(
-      process.env.DATABASE_ID,
-      transaction.$id,
-      operations
-    );
+    // 3. Stager les opérations avec la bonne syntaxe SDK 20.0.0
+    await databases.createOperations({
+      databaseId: process.env.DATABASE_ID,
+      transactionId: transaction.$id,
+      operations: operations,
+    });
 
     log(`Staged ${operations.length} operations`);
 
