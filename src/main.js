@@ -89,11 +89,8 @@ async function handleBatchUpdateProducts(databases, data, log, error, res) {
   let transaction = null;
 
   try {
-    // 1. Créer la transaction avec TTL (60-3600 secondes)
-    transaction = await databases.createTransaction(
-      process.env.DATABASE_ID,
-      300 // TTL de 5 minutes (300 secondes)
-    );
+    // 1. Créer la transaction
+    transaction = await databases.createTransaction(process.env.DATABASE_ID);
 
     log(`Transaction created: ${transaction.$id}`);
 
@@ -124,11 +121,10 @@ async function handleBatchUpdateProducts(databases, data, log, error, res) {
     log(`Staged ${operations.length} operations`);
 
     // 4. Commit la transaction
-    const result = await databases.updateTransaction(
-      process.env.DATABASE_ID,
-      transaction.$id,
-      'commit'
-    );
+    const result = await databases.updateTransaction({
+      transactionId: transaction.$id,
+      commit: true,
+    });
 
     log(`Transaction committed successfully`);
 
@@ -143,15 +139,18 @@ async function handleBatchUpdateProducts(databases, data, log, error, res) {
     error(`Transaction failed: ${transactionError.message}`);
 
     // Tenter de rollback si possible
-    try {
-      await databases.updateTransaction(
-        process.env.DATABASE_ID,
-        transaction.$id,
-        'rollback'
-      );
-      log('Transaction rolled back');
-    } catch (rollbackError) {
-      error(`Rollback failed: ${rollbackError.message}`);
+    if (transaction) {
+      try {
+        await databases.updateTransaction({
+          transactionId: transaction.$id,
+          rollback: true,
+        });
+        log('Transaction rolled back');
+      } catch (rollbackError) {
+        error(`Rollback failed: ${rollbackError.message}`);
+      }
+    } else {
+      log('No transaction to rollback - creation failed');
     }
 
     return res.json(
