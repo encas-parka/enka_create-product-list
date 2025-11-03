@@ -11,6 +11,7 @@ import { Client, TablesDB, ID } from 'node-appwrite';
  * - DATABASE_ID
  * - COLLECTION_MAIN
  * - COLLECTION_PRODUCTS
+ * - COLLECTION_PURCHASES
  */
 
 export default async function ({ req, res, log, error }) {
@@ -111,6 +112,11 @@ async function handleCreateGroupPurchaseWithSync(
 
   log(
     `Starting group purchase with sync: ${productsToCreate.length} products to create, ${purchasesToCreate.length} purchases to create, total operations: ${totalOperations}`
+  );
+
+  // Debug: Log environment variables
+  log(
+    `Environment variables: DATABASE_ID=${process.env.DATABASE_ID}, COLLECTION_PRODUCTS=${process.env.COLLECTION_PRODUCTS}, COLLECTION_PURCHASES=${process.env.COLLECTION_PURCHASES}`
   );
 
   let transaction = null;
