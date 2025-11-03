@@ -51,6 +51,72 @@ export default async function ({ req, res, log, error }) {
 }
 
 /**
+ * Transforme un EnrichedProduct en données Appwrite (similaire à enrichedProductToAppwriteProduct côté client)
+ * @param {Object} product - Produit enrichi
+ * @param {Object} batchUpdates - Updates batch à appliquer
+ * @returns {Object} Données formatées pour Appwrite
+ */
+function transformProductToAppwrite(product, batchUpdates = {}) {
+  // Données de base du produit
+  const baseData = {
+    productHugoUuid: product.productHugoUuid,
+    productName: product.productName,
+    mainId: product.mainId,
+    status: product.status || null,
+    who: product.who || null,
+    store: product.store || null,
+    stockReel: product.stockReel || null,
+    previousNames: product.previousNames || null,
+    isMerged: product.isMerged || false,
+    mergedFrom: product.mergedFrom || null,
+    mergeDate: product.mergeDate || null,
+    mergeReason: product.mergeReason || null,
+    mergedInto: product.mergedInto || null,
+    totalNeededOverride: product.totalNeededOverride || null,
+  };
+
+  // Appliquer les updates batch par-dessus les données de base
+  return {
+    ...baseData,
+    ...batchUpdates,
+  };
+}
+
+/**
+ * Applique les updates batch en fonction du type
+ * @param {string} updateType - Type de mise à jour
+ * @param {*} updateData - Données de mise à jour
+ * @param {Object} options - Options supplémentaires
+ * @returns {Object} Updates à appliquer
+ */
+function prepareBatchUpdates(updateType, updateData, options = {}) {
+  switch (updateType) {
+    case 'store':
+      // updateData: { storeName: string, storeComment?: string }
+      return {
+        store: JSON.stringify(updateData),
+      };
+
+    case 'who':
+      // updateData: { names: string[] }
+      if (options.mode === 'add') {
+        // Mode 'add' : logique gérée côté client en fusionnant les listes
+        return {
+          who: updateData.names,
+        };
+      } else {
+        // Mode 'replace'
+        return {
+          who: updateData.names,
+        };
+      }
+
+    default:
+      throw new Error(`Unsupported update type: ${updateType}`);
+  }
+}
+
+/**
  * Met à jour plusieurs produits en utilisant une transaction Appwrite
  * @param {TablesDB} databases - Instance Appwrite TablesDB
  * @param {Object} data - Données de la mise à jour groupée
@@ -59,7 +125,7 @@ export default async function ({ req, res, log, error }) {
  * @returns {Object} Résultat de l'opération
  */
 async function handleBatchUpdateProducts(databases, data, log, error, res) {
-  const { productIds, updateType, updateData, options = {} } = data;
+  const { productIds, products, updateType, updateData, options = {} } = data;
 
   if (!productIds?.length || !updateType || !updateData) {
     return res.json(
@@ -94,22 +160,40 @@ async function handleBatchUpdateProducts(databases, data, log, error, res) {
 
     log(`Transaction created: ${transaction.$id}`);
 
-    // 2. Préparer les opérations en fonction du type de mise à jour
+    // 2. Préparer les opérations mixtes (créations + mises à jour)
     const operations = productIds.map((productId) => {
-      const updatePayload = prepareUpdatePayload(
-        updateType,
-        updateData,
-        options
-      );
+      // Récupérer le produit complet depuis les données envoyées
+      const product = products.find((p) => p.$id === productId);
+      if (!product) {
+        throw new Error(`Product ${productId} not found in products data`);
+      }
+
+      // Préparer les updates batch
+      const batchUpdates = prepareBatchUpdates(updateType, updateData, options);
+
+      // Transformer le produit en données Appwrite avec les updates batch
+      const appwriteData = transformProductToAppwrite(product, batchUpdates);
+
+      // Déterminer si c'est une création ou une mise à jour
+      const isSynced = product.isSynced === true;
 
       return {
-        action: 'update',
+        action: isSynced ? 'update' : 'create',
         databaseId: process.env.DATABASE_ID,
         tableId: process.env.COLLECTION_PRODUCTS,
         rowId: productId,
-        data: updatePayload,
+        data: appwriteData,
       };
     });
+
+    // Logger les statistiques
+    const createCount = operations.filter(
+      (op) => op.action === 'create'
+    ).length;
+    const updateCount = operations.filter(
+      (op) => op.action === 'update'
+    ).length;
+    log(`Preparing ${createCount} creations and ${updateCount} updates`);
 
     // 3. Stager les opérations avec la bonne syntaxe SDK 20.0.0
     await databases.createOperations({
@@ -161,53 +245,5 @@ async function handleBatchUpdateProducts(databases, data, log, error, res) {
       },
       500
     );
-  }
-}
-
-/**
- * Prépare le payload de mise à jour en fonction du type
- * @param {string} updateType - Type de mise à jour (store, who, etc.)
- * @param {*} updateData - Données de mise à jour
- * @param {Object} options - Options supplémentaires
- * @returns {Object} Payload pour Appwrite
- */
-function prepareUpdatePayload(updateType, updateData, options) {
-  switch (updateType) {
-    case 'store':
-      // updateData: { storeName: string, storeComment?: string }
-      return {
-        store: JSON.stringify(updateData),
-      };
-
-    case 'who':
-      // updateData: { names: string[], mode: 'replace'|'add' }
-      if (options.mode === 'add') {
-        // Pour le mode 'add', on doit récupérer les valeurs existantes
-        // et ajouter les nouvelles (logique gérée côté client)
-        return {
-          who: updateData.names,
-        };
-      } else {
-        // Mode 'replace'
-        return {
-          who: updateData.names,
-        };
-      }
-
-    case 'stock':
-      // updateData: { quantity: number, unit: string, notes?: string }
-      return {
-        stockReel: JSON.stringify([
-          {
-            quantity: updateData.quantity.toString(),
-            unit: updateData.unit,
-            notes: updateData.notes || '',
-            dateTime: new Date().toISOString(),
-          },
-        ]),
-      };
-
-    default:
-      throw new Error(`Unsupported update type: ${updateType}`);
   }
 }
