@@ -57,7 +57,7 @@ export default async function ({ req, res, log, error }) {
  * @returns {Object} Données formatées pour Appwrite
  */
 function transformProductToAppwrite(product, batchUpdates = {}) {
-  // Données de base du produit
+  // Uniquement les champs métier, exclure toutes les métadonnées système ($*)
   const baseData = {
     productHugoUuid: product.productHugoUuid,
     productName: product.productName,
@@ -182,7 +182,10 @@ async function handleBatchUpdateProducts(databases, data, log, error, res) {
         databaseId: process.env.DATABASE_ID,
         tableId: process.env.COLLECTION_PRODUCTS,
         rowId: productId,
-        data: appwriteData,
+        data: {
+          $id: productId, // Forcer l'ID local pour les créations
+          ...appwriteData,
+        },
       };
     });
 
@@ -222,16 +225,23 @@ async function handleBatchUpdateProducts(databases, data, log, error, res) {
   } catch (transactionError) {
     error(`Transaction failed: ${transactionError.message}`);
 
-    // Tenter de rollback si possible
+    // Tenter de rollback si possible (avec délai pour éviter le "not ready yet")
     if (transaction) {
       try {
+        // Petit délai pour laisser la transaction se stabiliser
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
         await databases.updateTransaction({
           transactionId: transaction.$id,
           rollback: true,
         });
         log('Transaction rolled back');
       } catch (rollbackError) {
-        error(`Rollback failed: ${rollbackError.message}`);
+        if (rollbackError.message.includes('not ready yet')) {
+          log('Transaction not ready for rollback - will expire automatically');
+        } else {
+          error(`Rollback failed: ${rollbackError.message}`);
+        }
       }
     } else {
       log('No transaction to rollback - creation failed');
