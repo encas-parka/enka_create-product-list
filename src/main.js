@@ -41,12 +41,240 @@ export default async function ({ req, res, log, error }) {
           error,
           res
         );
+      case 'createGroupPurchaseWithSync':
+        return await handleCreateGroupPurchaseWithSync(
+          databases,
+          data,
+          log,
+          error,
+          res
+        );
       default:
         return res.json({ error: 'Unknown operation' }, 400);
     }
   } catch (e) {
     error(e.message);
     return res.json({ error: e.message }, 500);
+  }
+}
+
+/**
+ * Crée des achats groupés avec synchronisation de produits en utilisant une transaction Appwrite
+ * @param {TablesDB} databases - Instance Appwrite TablesDB
+ * @param {Object} data - Données de l'opération groupée
+ * @param {Function} log - Logger
+ * @param {Function} error - Error logger
+ * @returns {Object} Résultat de l'opération
+ */
+async function handleCreateGroupPurchaseWithSync(
+  databases,
+  data,
+  log,
+  error,
+  res
+) {
+  const { mainId, batchData, invoiceData } = data;
+
+  if (!mainId || !batchData || !invoiceData) {
+    return res.json(
+      {
+        error: 'Missing required parameters: mainId, batchData, invoiceData',
+      },
+      400
+    );
+  }
+
+  const { productsToCreate = [], purchasesToCreate = [] } = batchData;
+
+  // Calculer le nombre total d'opérations
+  const totalOperations = productsToCreate.length + purchasesToCreate.length;
+
+  // Limiter le nombre d'opérations par transaction
+  const maxOperations = 100; // Plan Free Appwrite
+  if (totalOperations > maxOperations) {
+    return res.json(
+      {
+        error: `Too many operations (${totalOperations}). Maximum ${maxOperations} operations per transaction`,
+      },
+      400
+    );
+  }
+
+  if (!invoiceData.invoiceId) {
+    return res.json(
+      {
+        error: 'invoiceId is required in invoiceData',
+      },
+      400
+    );
+  }
+
+  log(
+    `Starting group purchase with sync: ${productsToCreate.length} products to create, ${purchasesToCreate.length} purchases to create, total operations: ${totalOperations}`
+  );
+
+  let transaction = null;
+
+  try {
+    // 1. Créer la transaction
+    transaction = await databases.createTransaction();
+    log(`Transaction created: ${transaction.$id}`);
+
+    // 2. Préparer les opérations de création de produits
+    const productOperations = productsToCreate.map((product) => ({
+      action: 'create',
+      databaseId: process.env.DATABASE_ID,
+      tableId: process.env.COLLECTION_PRODUCTS,
+      rowId: product.productId,
+      data: {
+        $id: product.productId, // Forcer l'ID local
+        ...transformProductToAppwrite(product.productData),
+      },
+    }));
+
+    // 3. Préparer les opérations de création d'achats
+    const purchaseOperations = purchasesToCreate.map((purchase) => ({
+      action: 'create',
+      databaseId: process.env.DATABASE_ID,
+      tableId: process.env.COLLECTION_PURCHASES,
+      rowId: ID.unique(), // Générer un nouvel ID pour chaque achat
+      data: {
+        products: [purchase.productId],
+        mainId: mainId,
+        quantity: purchase.quantity,
+        unit: purchase.unit,
+        status: purchase.status || 'delivered',
+        notes: purchase.notes || '',
+        store: invoiceData.store || null,
+        who: purchase.who || null,
+        price: null,
+        invoiceId: invoiceData.invoiceId,
+        invoiceTotal: null,
+        orderDate: purchase.orderDate || null,
+        deliveryDate: purchase.deliveryDate || null,
+        createdBy: purchase.createdBy || null,
+      },
+    }));
+
+    // 4. Combiner toutes les opérations
+    const allOperations = [...productOperations, ...purchaseOperations];
+    log(
+      `Preparing ${productOperations.length} product creations and ${purchaseOperations.length} purchase creations`
+    );
+
+    // 5. Stager les opérations
+    await databases.createOperations({
+      databaseId: process.env.DATABASE_ID,
+      transactionId: transaction.$id,
+      operations: allOperations,
+    });
+
+    log(`Staged ${allOperations.length} operations`);
+
+    // 6. Commit la transaction
+    const result = await databases.updateTransaction({
+      transactionId: transaction.$id,
+      commit: true,
+    });
+
+    log(`Transaction committed successfully`);
+
+    // 7. Créer une dépense globale si invoiceTotal est fourni
+    let expenseResult = null;
+    if (invoiceData.invoiceTotal) {
+      try {
+        // Créer une dépense globale dans une transaction séparée
+        const expenseTransaction = await databases.createTransaction();
+
+        const expenseOperation = {
+          action: 'create',
+          databaseId: process.env.DATABASE_ID,
+          tableId: process.env.COLLECTION_PURCHASES,
+          rowId: ID.unique(),
+          data: {
+            products: [], // Pas de produits liés pour une dépense globale
+            mainId: mainId,
+            quantity: 1,
+            unit: 'global',
+            status: 'expense',
+            notes:
+              invoiceData.notes ||
+              `Facture globale pour ${purchasesToCreate.length} produits`,
+            store: invoiceData.store || null,
+            who: invoiceData.who || null,
+            price: null,
+            invoiceId: invoiceData.invoiceId,
+            invoiceTotal: invoiceData.invoiceTotal,
+            orderDate: null,
+            deliveryDate: null,
+            createdBy: null,
+          },
+        };
+
+        await databases.createOperations({
+          databaseId: process.env.DATABASE_ID,
+          transactionId: expenseTransaction.$id,
+          operations: [expenseOperation],
+        });
+
+        const expenseTransactionResult = await databases.updateTransaction({
+          transactionId: expenseTransaction.$id,
+          commit: true,
+        });
+
+        log(`Expense transaction committed successfully`);
+        expenseResult = expenseTransactionResult;
+      } catch (expenseError) {
+        log(
+          `Warning: Failed to create global expense: ${expenseError.message}`
+        );
+        // On ne fait pas échouer toute l'opération si juste la dépense globale échoue
+      }
+    }
+
+    return res.json({
+      success: true,
+      transactionId: transaction.$id,
+      productsCreated: productsToCreate.length,
+      purchasesCreated: purchasesToCreate.length,
+      expenseCreated: !!expenseResult,
+      totalOperations,
+      invoiceId: invoiceData.invoiceId,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (transactionError) {
+    error(`Transaction failed: ${transactionError.message}`);
+
+    // Tenter de rollback si possible
+    if (transaction) {
+      try {
+        // Petit délai pour laisser la transaction se stabiliser
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        await databases.updateTransaction({
+          transactionId: transaction.$id,
+          rollback: true,
+        });
+        log('Transaction rolled back');
+      } catch (rollbackError) {
+        if (rollbackError.message.includes('not ready yet')) {
+          log('Transaction not ready for rollback - will expire automatically');
+        } else {
+          error(`Rollback failed: ${rollbackError.message}`);
+        }
+      }
+    } else {
+      log('No transaction to rollback - creation failed');
+    }
+
+    return res.json(
+      {
+        success: false,
+        error: transactionError.message,
+        totalOperations,
+      },
+      500
+    );
   }
 }
 
